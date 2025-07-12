@@ -25,6 +25,9 @@ type ProxyServer struct {
 	listenAddr string
 	targetAddr string
 	tlsConfig  *tls.Config // TLS configuration for the server-side
+
+	// Channel to receive Master Secret from the modified crypto/tls library
+	masterSecretChan chan fillghost.MasterSecretExportMsg
 }
 
 // NewProxyServer creates a new ProxyServer instance.
@@ -44,10 +47,21 @@ func NewProxyServer(listenAddr, targetAddr, certFile, keyFile string) *ProxyServ
 		MaxVersion: tls.VersionTLS13,
 	}
 
+	// Create a buffered channel for master secret export messages.
+	// The buffer size should be large enough to not block the TLS handshake.
+	// WARNING: This channel is for conceptual demonstration ONLY.
+	// Do NOT export master secrets in production.
+	masterSecretChan := make(chan fillghost.MasterSecretExportMsg, 100)
+	// Set this channel in the modified crypto/tls library.
+	// This function call would only work if crypto/tls/fillghost_key_export.go
+	// is added to the standard library and Go is recompiled.
+	tls.SetMasterSecretExportChannel(masterSecretChan)
+
 	return &ProxyServer{
-		listenAddr: listenAddr,
-		targetAddr: targetAddr,
-		tlsConfig:  tlsConfig,
+		listenAddr:       listenAddr,
+		targetAddr:       targetAddr,
+		tlsConfig:        tlsConfig,
+		masterSecretChan: masterSecretChan,
 	}
 }
 
@@ -59,6 +73,18 @@ func (ps *ProxyServer) Start() {
 	}
 	defer listener.Close()
 	log.Printf("ProxyServer: Listening TLS on %s, forwarding to %s", ps.listenAddr, ps.targetAddr)
+
+	// Goroutine to continuously receive and log exported master secrets
+	go func() {
+		for msg := range ps.masterSecretChan {
+			log.Printf("ProxyServer: Received Master Secret for session %s (TLS %x, Cipher %x): %x\n",
+				msg.SessionID, msg.TLSVersion, msg.CipherSuite, msg.MasterSecret)
+			// In a real FillGhost implementation, you would store this master secret
+			// and other session parameters (like sequence numbers) per connection
+			// and pass them to the real TLSRecordEncryptor.
+		}
+	}()
+
 
 	for {
 		clientConn, err := listener.Accept()
@@ -76,6 +102,7 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 	log.Printf("ProxyServer: Accepted new client TLS connection from %s", clientTLSConn.RemoteAddr())
 
 	// Perform TLS handshake to get connection state
+	// This is blocking and will complete the handshake.
 	if err := clientTLSConn.Handshake(); err != nil {
 		log.Printf("ProxyServer: TLS handshake with %s failed: %v", clientTLSConn.RemoteAddr(), err)
 		return
@@ -93,9 +120,21 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 	// Instantiate the TLS record encryptor.
 	// For this example, we still use the Mock. In production, this needs replacement.
 	tlsEncryptor := fillghost.NewMockTLSRecordEncryptor(fmt.Sprintf("session-%s", clientTLSConn.RemoteAddr().String()))
-	// Conceptually set TLS context for the encryptor.
-	// In a real *tls.Conn integration*, this is where you'd pass necessary session secrets if possible.
-	err := tlsEncryptor.SetTLSContext(negotiatedTLSVersion, connState.CipherSuite, []byte("conceptually_derived_master_secret"))
+
+	// !!! IMPORTANT !!!
+	// In a real FillGhost implementation, you would need to get the actual
+	// master secret and current sequence numbers for this specific connection
+	// from your modified crypto/tls library.
+	// The masterSecretChan (from tls.SetMasterSecretExportChannel) would provide the master secret.
+	// Sequence numbers are internal to tls.Conn and would also need to be exposed/tracked
+	// if you are manually constructing records for injection.
+	// For this mock, we use placeholders for masterSecret and sequence numbers.
+	// In a complete solution, you'd match the received master secret from the channel
+	// to the current connection's session ID.
+	err := tlsEncryptor.SetTLSContext(connState.Version, connState.CipherSuite,
+		[]byte("placeholder_master_secret_from_actual_tls_conn"), // Placeholder
+		0, // Placeholder for client-to-server sequence number
+		0) // Placeholder for server-to-client sequence number (this proxy's outgoing)
 	if err != nil {
 		log.Printf("ProxyServer: Failed to set TLS context for encryptor: %v", err)
 		return
@@ -142,7 +181,7 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 	defer targetTLSConn.Close()
 	log.Printf("ProxyServer: Connected to target TLS server %s", ps.targetAddr)
 
-	// --- Goroutines for bidrectional data transfer ---
+	// --- Goroutines for bidirectional data transfer ---
 	var wg sync.WaitGroup
 	wg.Add(2)
 
