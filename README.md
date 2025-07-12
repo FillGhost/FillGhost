@@ -132,3 +132,52 @@ curl -k https://localhost:8888
 This project serves as a clear illustration of the FillGhost protocol's design and how its components (generator, encryptor, manager) would interact within a proxy. It highlights the significant challenges of implementing such a protocol in Go due to the secure, black-box nature of its `crypto/tls` library.
 
 For a truly effective and stealthy FillGhost implementation in Go, deep modifications to the `crypto/tls` standard library source code or the use of a more low-level TLS implementation (potentially via Cgo) would be necessary to gain access to session keys and perform direct, un-interfered-with record injection.
+
+---
+
+## Recommended TLS Libraries for FillGhost Users
+
+Implementing FillGhost effectively requires low-level access to TLS session keys and control over record construction and injection, capabilities that Go's standard `crypto/tls` library intentionally restricts for security and simplicity. If you're serious about building a robust FillGhost solution, you'll likely need to consider alternatives that offer more granular control.
+
+Here are the recommended TLS libraries that provide the necessary flexibility for FillGhost, listed with their pros and cons:
+
+### 1. OpenSSL (C/C++)
+
+**OpenSSL** is the industry standard for low-level TLS/SSL programming. If maximum control, performance, and deep protocol manipulation are your priorities, this is your go-to.
+
+* **Pros:**
+    * **Unparalleled Control:** Provides APIs to manage every aspect of a TLS session, including session key extraction, manual record layer construction, and direct network injection.
+    * **High Performance:** Optimized for speed and efficiency, crucial for network proxies.
+    * **Widely Adopted:** Extensive documentation, community support, and a proven track record in critical applications.
+* **Cons:**
+    * **Extreme Complexity:** The API is notoriously intricate, with a very steep learning curve.
+    * **Memory Management:** Requires manual memory handling, increasing the risk of memory leaks or vulnerabilities if not managed meticulously.
+    * **Development Time:** Expect significantly longer development and debugging cycles compared to higher-level libraries.
+
+### 2. Go-OpenSSL (Go with Cgo)
+
+This option allows you to leverage the power of **OpenSSL within your Go projects** by using **Cgo bindings** (e.g., `github.com/mreiferson/go-openssl`). It's a hybrid approach that can give you the best of both worlds.
+
+* **Pros:**
+    * **OpenSSL's Capabilities:** Access to OpenSSL's comprehensive set of features, including key management and record manipulation.
+    * **Go's Concurrency:** You can still utilize Go's excellent concurrency model (goroutines) for your proxy logic.
+    * **Familiarity (for Go devs):** You're still primarily writing Go code, even with the Cgo calls.
+* **Cons:**
+    * **Cgo Overhead:** Introduces Cgo complexities, which can make compilation harder, debugging more challenging, and might slightly impact performance compared to pure Go.
+    * **External Dependency:** Requires OpenSSL to be installed on the system where your application runs.
+    * **Increased Attack Surface:** Binding to a C library can expose your Go application to potential vulnerabilities in the C code or its dependencies.
+
+### 3. Rustls (Rust)
+
+**Rustls** is a modern, memory-safe TLS library written entirely in **Rust**. While it prioritizes correctness and safety, its design often allows for more direct interaction with TLS internals than Go's `crypto/tls` for specific, advanced use cases.
+
+* **Pros:**
+    * **Memory Safety:** Written in Rust, it inherently prevents common memory errors that plague C/C++ libraries.
+    * **Modern Design:** Clean, well-architected codebase that's easier to reason about than legacy C libraries.
+    * **Good Performance:** Rust's performance is comparable to C/C++.
+* **Cons:**
+    * **Newer Ecosystem:** Less mature and fewer third-party integrations compared to OpenSSL.
+    * **Learning Curve:** Requires learning Rust, which has a steeper learning curve than Go or Python.
+    * **Control Level:** While more flexible than Go's standard library, it might not offer the *absolute lowest level* of byte-level control that OpenSSL does without deeper internal modifications.
+
+---
