@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -13,33 +12,19 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"net" // 导入 net 包
 	"os"
-	"sync"
-	"time"
+	"sync" // 导入 sync 包
+	"time" // 导入 time 包
 
 	"github.com/FillGhost/FillGhost" // Corrected module import path
 )
-
-// MasterSecretExportMsg is now defined within the fillghost package
-// This is to make the example runnable without modifying standard crypto/tls.
-// In a real scenario, this type would originate from the modified crypto/tls library.
-// For this example, we mock receiving such a message.
-type MasterSecretExportMsg struct {
-	SessionID    string // Identifier for the session, e.g., remote address
-	TLSVersion   uint16 // Negotiated TLS version (e.g., tls.VersionTLS12, tls.VersionTLS13)
-	CipherSuite  uint16 // Negotiated cipher suite ID
-	MasterSecret []byte // Exported masterSecret
-}
 
 // ProxyServer simulates a proxy server demonstrating the integration of FillGhostManager.
 type ProxyServer struct {
 	listenAddr string
 	targetAddr string
 	tlsConfig  *tls.Config // TLS configuration for the server-side
-
-	// This channel simulates receiving Master Secret from a *hypothetically* modified crypto/tls library.
-	// In a real implementation, you would need to modify crypto/tls to send to this channel.
-	masterSecretChan chan MasterSecretExportMsg
 }
 
 // NewProxyServer creates a new ProxyServer instance.
@@ -53,20 +38,14 @@ func NewProxyServer(listenAddr, targetAddr, certFile, keyFile string) *ProxyServ
 	}
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS10,
+		MinVersion:   tls.VersionTLS10, // Support TLS 1.0 to 1.3 as per request
 		MaxVersion:   tls.VersionTLS13,
 	}
 
-	// Create a buffered channel for master secret export messages.
-	// WARNING: This channel is for conceptual demonstration ONLY.
-	// Do NOT export master secrets in production.
-	masterSecretChan := make(chan MasterSecretExportMsg, 100)
-
 	return &ProxyServer{
-		listenAddr:       listenAddr,
-		targetAddr:       targetAddr,
-		tlsConfig:        tlsConfig,
-		masterSecretChan: masterSecretChan,
+		listenAddr: listenAddr,
+		targetAddr: targetAddr,
+		tlsConfig:  tlsConfig,
 	}
 }
 
@@ -78,19 +57,6 @@ func (ps *ProxyServer) Start() {
 	}
 	defer listener.Close()
 	log.Printf("ProxyServer: Listening TLS on %s, forwarding to %s", ps.listenAddr, ps.targetAddr)
-
-	// Goroutine to continuously receive and log exported master secrets.
-	// In a real scenario with a modified crypto/tls, this would receive real keys.
-	go func() {
-		for msg := range ps.masterSecretChan {
-			log.Printf("ProxyServer: Received Master Secret for session %s (TLS %x, Cipher %x): %x\n",
-				msg.SessionID, msg.TLSVersion, msg.CipherSuite, msg.MasterSecret)
-			// In a real FillGhost implementation, you would store this master secret
-			// and other session parameters (like sequence numbers) per connection
-			// and pass them to the real TLSRecordEncryptor.
-			// For this example, we just log it.
-		}
-	}()
 
 	for {
 		clientConn, err := listener.Accept()
@@ -127,8 +93,7 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 	// In a real FillGhost implementation, you *must* obtain the actual master secret
 	// and current *outgoing* sequence numbers for this specific connection
 	// from your **modified crypto/tls library**.
-	// The `masterSecretChan` in `ProxyServer` would be the mechanism to receive the master secret.
-	// You would need a mechanism to map it to the correct `clientTLSConn`.
+	// The `fillghost.TLSRecordEncryptor` interface expects these parameters.
 	dummyMasterSecret := []byte("A_SUPER_SECRET_DUMMY_MASTER_SECRET_FOR_DEMO_PURPOSES") // Replace with actual exported key
 	dummyClientSeqNum := uint64(0)                                                   // Replace with actual client-to-server sequence number
 	dummyServerSeqNum := uint64(0)                                                   // Replace with actual server-to-client sequence number (this proxy's outgoing)
@@ -243,6 +208,8 @@ func min(a, b int) int {
 	return b
 }
 
+// generateSelfSignedCert generates a self-signed TLS certificate and key for testing.
+// DO NOT USE IN PRODUCTION.
 func generateSelfSignedCert(certFile, keyFile string) error {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
