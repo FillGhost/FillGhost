@@ -1,7 +1,7 @@
 package main
 
 import (
-	"net"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -20,14 +20,26 @@ import (
 	"github.com/FillGhost/FillGhost" // Corrected module import path
 )
 
+// MasterSecretExportMsg is now defined within the fillghost package
+// This is to make the example runnable without modifying standard crypto/tls.
+// In a real scenario, this type would originate from the modified crypto/tls library.
+// For this example, we mock receiving such a message.
+type MasterSecretExportMsg struct {
+	SessionID    string // Identifier for the session, e.g., remote address
+	TLSVersion   uint16 // Negotiated TLS version (e.g., tls.VersionTLS12, tls.VersionTLS13)
+	CipherSuite  uint16 // Negotiated cipher suite ID
+	MasterSecret []byte // Exported masterSecret
+}
+
 // ProxyServer simulates a proxy server demonstrating the integration of FillGhostManager.
 type ProxyServer struct {
 	listenAddr string
 	targetAddr string
 	tlsConfig  *tls.Config // TLS configuration for the server-side
 
-	// Channel to receive Master Secret from the modified crypto/tls library
-	masterSecretChan chan fillghost.MasterSecretExportMsg
+	// This channel simulates receiving Master Secret from a *hypothetically* modified crypto/tls library.
+	// In a real implementation, you would need to modify crypto/tls to send to this channel.
+	masterSecretChan chan MasterSecretExportMsg
 }
 
 // NewProxyServer creates a new ProxyServer instance.
@@ -41,21 +53,14 @@ func NewProxyServer(listenAddr, targetAddr, certFile, keyFile string) *ProxyServ
 	}
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		// In a real scenario, you might want to specify MinVersion and MaxVersion
-		// For FillGhost, the important part is knowing the *negotiated* version for each connection.
-		MinVersion: tls.VersionTLS10, // Support TLS 1.0 to 1.3 as per request
-		MaxVersion: tls.VersionTLS13,
+		MinVersion:   tls.VersionTLS10,
+		MaxVersion:   tls.VersionTLS13,
 	}
 
 	// Create a buffered channel for master secret export messages.
-	// The buffer size should be large enough to not block the TLS handshake.
 	// WARNING: This channel is for conceptual demonstration ONLY.
 	// Do NOT export master secrets in production.
-	masterSecretChan := make(chan fillghost.MasterSecretExportMsg, 100)
-	// Set this channel in the modified crypto/tls library.
-	// This function call would only work if crypto/tls/fillghost_key_export.go
-	// is added to the standard library and Go is recompiled.
-	tls.SetMasterSecretExportChannel(masterSecretChan)
+	masterSecretChan := make(chan MasterSecretExportMsg, 100)
 
 	return &ProxyServer{
 		listenAddr:       listenAddr,
@@ -74,7 +79,8 @@ func (ps *ProxyServer) Start() {
 	defer listener.Close()
 	log.Printf("ProxyServer: Listening TLS on %s, forwarding to %s", ps.listenAddr, ps.targetAddr)
 
-	// Goroutine to continuously receive and log exported master secrets
+	// Goroutine to continuously receive and log exported master secrets.
+	// In a real scenario with a modified crypto/tls, this would receive real keys.
 	go func() {
 		for msg := range ps.masterSecretChan {
 			log.Printf("ProxyServer: Received Master Secret for session %s (TLS %x, Cipher %x): %x\n",
@@ -82,9 +88,9 @@ func (ps *ProxyServer) Start() {
 			// In a real FillGhost implementation, you would store this master secret
 			// and other session parameters (like sequence numbers) per connection
 			// and pass them to the real TLSRecordEncryptor.
+			// For this example, we just log it.
 		}
 	}()
-
 
 	for {
 		clientConn, err := listener.Accept()
@@ -102,14 +108,11 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 	log.Printf("ProxyServer: Accepted new client TLS connection from %s", clientTLSConn.RemoteAddr())
 
 	// Perform TLS handshake to get connection state
-	// This is blocking and will complete the handshake.
 	if err := clientTLSConn.Handshake(); err != nil {
 		log.Printf("ProxyServer: TLS handshake with %s failed: %v", clientTLSConn.RemoteAddr(), err)
 		return
 	}
 
-	// Get negotiated TLS version from the active connection state.
-	// This is crucial for the FillGhost's TLSRecordEncryptor.
 	connState := clientTLSConn.ConnectionState()
 	negotiatedTLSVersion := make([]byte, 2)
 	binary.BigEndian.PutUint16(negotiatedTLSVersion, connState.Version)
@@ -117,45 +120,29 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 	log.Printf("ProxyServer: Negotiated TLS Version: 0x%x (TLS %d.%d)", connState.Version,
 		(connState.Version>>8)&0xFF, connState.Version&0xFF)
 
-	// Instantiate the TLS record encryptor.
-	// For this example, we still use the Mock. In production, this needs replacement.
 	tlsEncryptor := fillghost.NewMockTLSRecordEncryptor(fmt.Sprintf("session-%s", clientTLSConn.RemoteAddr().String()))
 
 	// !!! IMPORTANT !!!
-	// In a real FillGhost implementation, you would need to get the actual
-	// master secret and current sequence numbers for this specific connection
-	// from your modified crypto/tls library.
-	// The masterSecretChan (from tls.SetMasterSecretExportChannel) would provide the master secret.
-	// Sequence numbers are internal to tls.Conn and would also need to be exposed/tracked
-	// if you are manually constructing records for injection.
-	// For this mock, we use placeholders for masterSecret and sequence numbers.
-	// In a complete solution, you'd match the received master secret from the channel
-	// to the current connection's session ID.
+	// For this *demonstration*, we are passing a DUMMY master secret and sequence numbers.
+	// In a real FillGhost implementation, you *must* obtain the actual master secret
+	// and current *outgoing* sequence numbers for this specific connection
+	// from your **modified crypto/tls library**.
+	// The `masterSecretChan` in `ProxyServer` would be the mechanism to receive the master secret.
+	// You would need a mechanism to map it to the correct `clientTLSConn`.
+	dummyMasterSecret := []byte("A_SUPER_SECRET_DUMMY_MASTER_SECRET_FOR_DEMO_PURPOSES") // Replace with actual exported key
+	dummyClientSeqNum := uint64(0)                                                   // Replace with actual client-to-server sequence number
+	dummyServerSeqNum := uint64(0)                                                   // Replace with actual server-to-client sequence number (this proxy's outgoing)
+
 	err := tlsEncryptor.SetTLSContext(connState.Version, connState.CipherSuite,
-		[]byte("placeholder_master_secret_from_actual_tls_conn"), // Placeholder
-		0, // Placeholder for client-to-server sequence number
-		0) // Placeholder for server-to-client sequence number (this proxy's outgoing)
+		dummyMasterSecret, dummyClientSeqNum, dummyServerSeqNum)
 	if err != nil {
 		log.Printf("ProxyServer: Failed to set TLS context for encryptor: %v", err)
 		return
 	}
 
-	// The sendCallback function for FillGhost Manager.
-	// This function *must* write directly to the underlying net.Conn *before* tls.Conn
-	// for pre-formed TLS records (like FillGhost) to bypass the tls.Conn's own encryption.
-	// This is a complex point in Go's crypto/tls design.
-	// For this example, we directly write to the *tls.Conn*, which means the mock
-	// FillGhost packets will be *re-encrypted* by tls.Conn, which is NOT the intended
-	// behavior of FillGhost for stealth. This highlights the limitation.
 	sendToClientCallback := func(data []byte) error {
-		// In a true FillGhost implementation, `data` (which is already a mock TLS record)
-		// would need to be written *directly* to the underlying `net.Conn` of `clientTLSConn`
-		// *without* going through `clientTLSConn.Write()`.
-		// Accessing the underlying `net.Conn` of a `*tls.Conn` is not directly exposed
-		// in a public API. It often requires type assertions and understanding of
-		// internal structures or wrapping the net.Conn before tls.Client/Server.
 		log.Printf("ProxyServer: (Mock) Attempting to send FillGhost packet via clientTLSConn.Write().")
-		_, err := clientTLSConn.Write(data) // This will cause `data` to be re-encrypted by *tls.Conn
+		_, err := clientTLSConn.Write(data)
 		return err
 	}
 
@@ -172,7 +159,6 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 		return
 	}
 
-	// --- Connect to Target Server (real TLS connection) ---
 	targetTLSConn, err := tls.Dial("tcp", ps.targetAddr, &tls.Config{InsecureSkipVerify: true}) // Use proper cert validation in prod
 	if err != nil {
 		log.Printf("ProxyServer: Failed to connect to target TLS server %s: %v", ps.targetAddr, err)
@@ -181,20 +167,15 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 	defer targetTLSConn.Close()
 	log.Printf("ProxyServer: Connected to target TLS server %s", ps.targetAddr)
 
-	// --- Goroutines for bidirectional data transfer ---
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Client to Target
 	go func() {
 		defer wg.Done()
-		defer fillGhostManager.StopInjection() // Ensure injection stops if client side closes
-		// We use a custom io.Copy here to detect when a request is sent.
-		// A real proxy would parse application layer data (e.g., HTTP/S frames)
-		// to determine when a logical request has been fully forwarded.
+		defer fillGhostManager.StopInjection()
 		requestBuf := make([]byte, 4096)
 		for {
-			clientTLSConn.SetReadDeadline(time.Now().Add(10 * time.Second)) // Set a read timeout for client
+			clientTLSConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 			n, err := clientTLSConn.Read(requestBuf)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -209,7 +190,6 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 			clientRequest := requestBuf[:n]
 			log.Printf("ProxyServer: Received %d bytes from client (via TLS.Read): %s", len(clientRequest), string(clientRequest[:min(len(clientRequest), 50)]))
 
-			// Write client request to target
 			_, err = targetTLSConn.Write(clientRequest)
 			if err != nil {
 				log.Printf("ProxyServer: Failed to write to target %s: %v", ps.targetAddr, err)
@@ -217,17 +197,15 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 			}
 			log.Println("ProxyServer: Request forwarded to target server.")
 
-			// Start FillGhost injection immediately after forwarding the request
 			fillGhostManager.StartInjection()
 		}
 	}()
 
-	// Target to Client
 	go func() {
 		defer wg.Done()
 		responseBuf := make([]byte, 4096)
 		for {
-			targetTLSConn.SetReadDeadline(time.Now().Add(10 * time.Second)) // Set a read timeout for target
+			targetTLSConn.SetReadDeadline(time.Now().Add(10 * time.Second))
 			n, err := targetTLSConn.Read(responseBuf)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -237,17 +215,14 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 				} else {
 					log.Printf("ProxyServer: Target %s closed connection.", ps.targetAddr)
 				}
-				// When target closes connection or an error occurs, stop FillGhost injection.
 				fillGhostManager.StopInjection()
 				return
 			}
 			targetResponse := responseBuf[:n]
 			log.Printf("ProxyServer: Received %d bytes from target (via TLS.Read): %s", len(targetResponse), string(targetResponse[:min(len(targetResponse), 50)]))
 
-			// Stop FillGhost injection as soon as the first byte/response from the target arrives
 			fillGhostManager.StopInjection()
 
-			// Forward the legitimate response to the client
 			_, err = clientTLSConn.Write(targetResponse)
 			if err != nil {
 				log.Printf("ProxyServer: Failed to send response to client %s: %v", clientTLSConn.RemoteAddr(), err)
@@ -257,7 +232,7 @@ func (ps *ProxyServer) handleClient(clientTLSConn *tls.Conn) {
 		}
 	}()
 
-	wg.Wait() // Wait for both directions to complete
+	wg.Wait()
 	log.Printf("ProxyServer: Connection with %s ended.", clientTLSConn.RemoteAddr())
 }
 
@@ -268,18 +243,14 @@ func min(a, b int) int {
 	return b
 }
 
-// generateSelfSignedCert generates a self-signed TLS certificate and key for testing.
-// DO NOT USE IN PRODUCTION.
 func generateSelfSignedCert(certFile, keyFile string) error {
-	// Minimal self-signed cert generation for testing purposes
-	// This is simplified and does not handle all real-world certificate complexities.
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("failed to generate private key: %w", err)
 	}
 
 	notBefore := time.Now()
-	notAfter := notBefore.Add(365 * 24 * time.Hour) // Valid for 1 year
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
 
 	template := x509.Certificate{
 		SerialNumber: big.NewInt(1),
@@ -292,7 +263,7 @@ func generateSelfSignedCert(certFile, keyFile string) error {
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"}, // For testing on localhost
+		DNSNames:              []string{"localhost"},
 	}
 
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
@@ -318,11 +289,8 @@ func generateSelfSignedCert(certFile, keyFile string) error {
 }
 
 func main() {
-	// Configure logging to include timestamps with microseconds for better timing observation
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	// --- Generate self-signed TLS certificate for the proxy server (for testing) ---
-	// In production, use a proper CA-signed certificate.
 	certFile := "server.crt"
 	keyFile := "server.key"
 	if err := generateSelfSignedCert(certFile, keyFile); err != nil {
@@ -330,7 +298,6 @@ func main() {
 	}
 	log.Printf("Generated self-signed certificate and key at %s, %s", certFile, keyFile)
 
-	// Proxy listens on :8888, forwards to example.com:443
 	proxy := NewProxyServer(":8888", "example.com:443", certFile, keyFile)
 	proxy.Start()
 }
